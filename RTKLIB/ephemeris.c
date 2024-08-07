@@ -834,7 +834,7 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, nav_t *nav,
     int i, j;
 
     // trace(3,"satposs : teph=%s n=%d ephopt=%d\n",time_str(teph,3),n,ephopt);
-
+    //* 1、按照观测数据的顺序，首先将将当前观测卫星的 rs、dts、var和svh数组的元素置 0。
     for (i = 0; i < n && i < 2 * MAXOBS; i++)
     {
         for (j = 0; j < 6; j++)
@@ -844,28 +844,36 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, nav_t *nav,
         var[i] = 0.0;
         svh[i] = 0;
 
-        /* search any psuedorange */
+        /* search any psuedo range */
+        //* 2、通过判断某一频率下信号的伪距是否为 0，来得到此时所用的频率个数。
+        //     注意，频率个数不能大于 NFREQ（默认为 3）
         for (j = 0, pr = 0.0; j < NFREQ; j++)
             if ((pr = obs[i].P[j]) != 0.0)
                 break;
 
         if (j >= NFREQ)
         {
-            // trace(2,"no pseudorange %s sat=%2d\n",time_str(obs[i].time,3),obs[i].sat);
+            // trace(2,"no pseudo range %s sat=%2d\n",time_str(obs[i].time,3),obs[i].sat);
             continue;
         }
         /* transmission time by satellite clock */
+        //* 3、用数据接收时间减去伪距信号传播时间，得到卫星信号的发射时间。
         time[i] = timeadd(obs[i].time, -pr / CLIGHT);
 
         /* satellite clock bias by broadcast ephemeris */
+        //* 4、调用 ephclk函数，由广播星历计算出当前观测卫星的钟差。
+        //!     注意，此时的钟差是没有考虑相对论效应和广播星历播发的时间群延迟(time group delay,TGD)。
         if (!ephclk(time[i], teph, obs[i].sat, nav, &dt))
         {
             // trace(3,"no broadcast clock %s sat=%2d\n",time_str(time[i],3),obs[i].sat);
             continue;
         }
+        //*5、用 3中的信号发射时间减去 4中的钟偏，得到 GPS时间下的卫星信号发射时间
         time[i] = timeadd(time[i], -dt);
 
         /* satellite position and clock at transmission time */
+        //*6、调用 satpos函数，计算信号发射时刻卫星的 P(ecef,m)、V(ecef,m/s)、C((s|s/s))。
+        //!     注意，这里计算出的钟差是考虑了相对论效应的了，只是还没有考虑 TGD。
         if (!satpos(time[i], teph, obs[i].sat, ephopt, nav, rs + i * 6, dts + i * 2, var + i,
                     svh + i))
         {
@@ -873,6 +881,7 @@ extern void satposs(gtime_t teph, const obsd_t *obs, int n, nav_t *nav,
             continue;
         }
         /* if no precise clock available, use broadcast clock instead */
+        //* 如果由6中计算出的钟偏为0，就再次调用ephclk函数，将其计算出的卫星钟偏作为最终的结果。
         if (dts[i * 2] == 0.0)
         {
             if (!ephclk(time[i], teph, obs[i].sat, nav, dts + i * 2))
