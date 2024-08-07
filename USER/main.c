@@ -98,13 +98,13 @@ int main(void)
             if (ublox_raw_flag == 1)
             {
 
-                time = gpst2utc(svr.raw[0].time);
+                time = gpst2utc(svr.raw[0].time);//将GPST转为UTC时间，
                 if (time.sec >= 0.995)
                 {
                     time.time++;
                     time.sec = 0.0;
                 }
-                time2epoch(time, ep);
+                time2epoch(time, ep);//1970.1.1起秒数转日历
 
                 rtkpos(&svr.rtk, svr.raw[0].obs.data, svr.raw[0].obs.n, &svr.raw[0].nav);
                 //				outsol(Soluion,&svr.rtk.sol,svr.rtk.rb);

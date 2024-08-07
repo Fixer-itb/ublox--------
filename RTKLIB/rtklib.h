@@ -442,6 +442,8 @@ extern unsigned char ublox_eph_flag;
 #define LEXHEADLEN 24           /* lex binary header length (bytes) */
 extern const double lam_carr[]; /* carrier wave length (m) {L1,L2,...} */
 
+/*RTKLIB内以GPST进行计算处理，其它时间系统的数据需转换为GPST数据才能进行计算。
+gtime_t只是一种时间表示的形式，来表示GPST、UCT、BDT、GST*/
 typedef struct
 {               /* time struct */
     long time;  /* time (s) expressed by standard time_t */

@@ -435,6 +435,10 @@ extern void time2epoch(gtime_t t, double *ep)
 *-----------------------------------------------------------------------------*/
 extern gtime_t epoch2time(const double *ep)
 {
+    /*平年每月的第一天的年积日,年积日是仅在一年中使用的连续计算日期的方法，
+    是从当年1月1日起开始计算的天数。 
+    例如：每年的1月1日为第1日，2月1日为第32日，以此类推。 
+    平年的12月31日为第365日，闰年的12月31日为第366日。*/
     const int doy[]={1,32,60,91,121,152,182,213,244,274,305,335};
     gtime_t time={0};
     int days,sec,year=(int)ep[0],mon=(int)ep[1],day=(int)ep[2];
@@ -541,6 +545,7 @@ extern void time2str(gtime_t t, char *s, int n)
 *-----------------------------------------------------------------------------*/
 extern gtime_t gpst2utc(gtime_t t)
 {
+    /*GPST与UTC的零时刻 = 1980年1月6日（星期日） */
     gtime_t tu;
     int i;
     
