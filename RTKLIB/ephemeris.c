@@ -185,6 +185,7 @@ extern double eph2clk(gtime_t time, const eph_t *eph)
 /* broadcast ephemeris to satellite position and clock bias --------------------
  * compute satellite position and clock bias with broadcast ephemeris (gps,
  * galileo, qzss)
+ * 根据广播星历计算出算信号发射时刻卫星的位置和钟差
  * args   : gtime_t time     I   time (gpst)
  *          eph_t *eph       I   broadcast ephemeris
  *          double *rs       O   satellite position (ecef) {x,y,z} (m)
@@ -198,7 +199,10 @@ extern double eph2clk(gtime_t time, const eph_t *eph)
 extern void eph2pos(gtime_t time, const eph_t *eph, double *rs, double *dts,
                     double *var)
 {
-    double tk, M, E, Ek, sinE, cosE, u, r, i, O, sin2u, cos2u, x, y, sinO, cosO, cosi, mu, omge;
+    //* 与大部分资料上计算卫星位置和钟差的过程是一样的，只是这里在计算偏近点角 E时采用的是牛顿法来进行迭代求解。
+    //* 计算误差直接采用 URA值来标定，具体对应关系可在 ICD-GPS-200C P83中找到。
+
+    double tk, M, E, Ek, sinE, cosE, u, r, i, O, sin2u, cos2u, x, y, sinO, cosO, cosi, mu/*地球引力常数*/, omge/*地球自转角速度*/;    
     double xg, yg, zg, sino, coso;
     int n, sys, prn;
 
@@ -226,7 +230,7 @@ extern void eph2pos(gtime_t time, const eph_t *eph, double *rs, double *dts,
         omge = OMGE;
         break;
     }
-    M = eph->M0 + (sqrt(mu / (eph->A * eph->A * eph->A)) + eph->deln) * tk;
+    M = eph->M0 + (sqrt(mu / (eph->A * eph->A * eph->A)) + eph->deln) * tk;/*eph->A 轨道长半径 */
 
     for (n = 0, E = M, Ek = 0.0; fabs(E - Ek) > RTOL_KEPLER && n < MAX_ITER_KEPLER; n++)
     {
@@ -547,6 +551,17 @@ static seph_t *selseph(gtime_t time, int sat, nav_t *nav)
     return nav->seph + j;
 }
 /* satellite clock with broadcast ephemeris ----------------------------------*/
+/**
+ * @brief 通过广播星历确定卫星钟偏
+ *
+ * gtime_t  time      I   transmission time by satellite clock
+ * gtime_t  teph      I   time to select ephemeris (gpst)
+ * int      sat       I   satellite number (1-MAXSAT)
+ * nav_t    *nav      I   navigation data
+ * double   *dts      O   satellite clocks，长度为2*n， {bias,drift} (s|s/s)
+ * 返回类型:
+ * int                O     (1:ok,0:error)
+ */
 static int ephclk(gtime_t time, gtime_t teph, int sat, nav_t *nav,
                   double *dts)
 {
@@ -556,14 +571,16 @@ static int ephclk(gtime_t time, gtime_t teph, int sat, nav_t *nav,
     int sys;
 
     // trace(4,"ephclk  : time=%s sat=%2d\n",time_str(time,3),sat);
-
+    //* 1、根据卫星编号确定该卫星所属的导航系统和该卫星在该系统中的 PRN编号。
     sys = satsys(sat, NULL);
 
     if (sys == SYS_GPS || sys == SYS_GAL || sys == SYS_QZS || sys == SYS_CMP)
     {
+        //* 2、对于 GPS导航系统，调用 seleph函数来选择 toe值与星历选择时间标准 teph最近的那个星历。
         if (!(eph = seleph(teph, sat, -1, nav)))
             return 0;
-        *dts = eph2clk(time, eph);
+        //* 3、通过广播星历和信号发射时间计算出卫星钟差。
+        *dts = eph2clk(time, eph);  //!此时计算出的卫星钟偏是没有考虑相对论效应和 TGD的。
     }
     else if (sys == SYS_GLO)
     {
@@ -583,6 +600,20 @@ static int ephclk(gtime_t time, gtime_t teph, int sat, nav_t *nav,
     return 1;
 }
 /* satellite position and clock by broadcast ephemeris -----------------------*/
+/**
+ * @brief 根据广播星历计算出算信号发射时刻卫星的 P、V、C
+ * gtime_t  time      I   transmission time by satellite clock
+ * gtime_t  teph      I   time to select ephemeris (gpst)
+ * int      sat       I   satellite number (1-MAXSAT)
+ * nav_t    *nav      I   navigation data
+ * int      iode      I   星历数据期号
+ * double   *rs       O   satellite positions and velocities，长度为6*n，{x,y,z,vx,vy,vz}(ecef)(m,m/s)
+ * double   *dts      O   satellite clocks，长度为2*n， {bias,drift} (s|s/s)
+ * double   *var      O   sat position and clock error variances (m^2)
+ * int      *svh      O   sat health flag (-1:correction not available)
+ * 返回类型：
+ * int                O    (1:ok,0:error)
+ */
 static int ephpos(gtime_t time, gtime_t teph, int sat, nav_t *nav,
                   int iode, double *rs, double *dts, double *var, int *svh)
 {
@@ -593,19 +624,24 @@ static int ephpos(gtime_t time, gtime_t teph, int sat, nav_t *nav,
     int i, sys;
 
     // trace(4,"ephpos  : time=%s sat=%2d iode=%d\n",time_str(time,3),sat,iode);
-
+    //* 1、确定该卫星所属的导航系统
     sys = satsys(sat, NULL);
 
     *svh = -1;
 
     if (sys == SYS_GPS || sys == SYS_GAL || sys == SYS_QZS || sys == SYS_CMP)
     {
+        //* 2、如果导航系统属于GPS系统，则调用seleph函数选择广播星历
         if (!(eph = seleph(teph, sat, iode, nav)))
             return 0;
-
+        //* 3、根据广播星历，计算信号发射时刻卫星的 位置、钟差和相应结果的误差。
         eph2pos(time, eph, rs, dts, var);
         time = timeadd(time, tt);
+        //* 4、在信号发射时刻的基础上给定一个微小的时间间隔，再次计算新时刻的 P、V、C。与 3结合，通过扰动法计算出卫星的速度和频漂。
         eph2pos(time, eph, rst, dtst, var);
+        //! 这里是使用扰动法计算卫星的速度和频漂，并没有使用那些位置和钟差公式对时间求导的结果。
+        //!    由于是调用的 eph2pos函数，计算得到的钟差考虑了相对论效应，还没有考虑 TGD
+
         *svh = eph->svh;
     }
     else if (sys == SYS_GLO)
@@ -789,6 +825,8 @@ extern int satpos(gtime_t time, gtime_t teph, int sat, int ephopt,
 
     switch (ephopt)
     {
+    //* 1、判断星历选项的值，如果是 EPHOPT_BRDC，调用 ephpos函数，根据广播星历计算出算信号发射时刻卫星的 P、V、C
+    //!     此时计算出的卫星钟差考虑了相对论，还没有考虑 TGD
     case EPHOPT_BRDC:
         return ephpos(time, teph, sat, nav, -1, rs, dts, var, svh);
         // case EPHOPT_SBAS  : return satpos_sbas(time,teph,sat,nav,   rs,dts,var,svh);

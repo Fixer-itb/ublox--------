@@ -72,13 +72,23 @@ static const unsigned int tbl_CRC24Q[]={
 * notes  : dop[0]-[3] return 0 in case of dop computation error
 *-----------------------------------------------------------------------------*/
 #define SQRT(x)     ((x)<0.0||(x)!=(x)?0.0:sqrt(x))
-
+/**
+ * @brief 由站心坐标系时的权系数矩阵表达式 H = (GG')^-1，计算各种精度因子。
+ * 
+ * int      ns        I   number of satellites
+ * double   *azel     I   satellite azimuth/elevation angle (rad)
+ * double   elmin     I   elevation cutoff angle (rad)
+ * double   *dop      O   DOPs {GDOP,PDOP,HDOP,VDOP}
+ * 返回类型：
+ * none
+ */
 extern void dops(int ns, const double *azel, double elmin, double *dop)
 {
     double H[4*MAXSAT],Q[16],cosel,sinel;
     int i,n;
     
     for (i=0;i<4;i++) dop[i]=0.0;
+    //* 1、先按照如下站心坐标系时的几何矩阵G的表达式求出其值。
     for (i=n=0;i<ns&&i<MAXSAT;i++) {
         if (azel[1+i*2]<elmin||azel[1+i*2]<=0.0) continue;
         cosel=cos(azel[1+i*2]);
@@ -88,10 +98,12 @@ extern void dops(int ns, const double *azel, double elmin, double *dop)
         H[2+4*n]=sinel;
         H[3+4*n++]=1.0;
     }
+    //* 2、检验上述矩阵的列数是否≥4
     if (n<4) return;
-    
+    //* 3、计算出H = (GG')^-1
     matmul("NT",4,4,n,1.0,H,H,0.0,Q);
     if (!matinv(Q,4)) {
+        //* 4、按顺序计算GDOP PDOP HDOP VDOP
         dop[0]=SQRT(Q[0]+Q[5]+Q[10]+Q[15]); /* GDOP */
         dop[1]=SQRT(Q[0]+Q[5]+Q[10]);       /* PDOP */
         dop[2]=SQRT(Q[0]+Q[5]);             /* HDOP */
@@ -681,13 +693,20 @@ extern int matinv(double *A, int n)
 extern int lsq(const double *A, const double *y, int n, int m, double *x,
                double *Q)
 {
+    //! 对于加权最小二乘，可以直接在调用该函数之前直接将 A、y进行加权处理，之后在调用该函数，这样得到的就是加权最小二乘的解。
+    //! 所有的矩阵都是列优先存储的，对于整个源代码来说，矩阵都是这样存储的。
+    //      !所以对于代码中出现的一维矩阵，基本都应该是列向量。在阅读数组下标时，记住这一点是非常重要的。
+    //! 矩阵求逆并不简单，尤其是对于接近奇异的矩阵。但是由于这是个基本功能，并不打算继续深入下去。
     double Ay[MAXOBS];
     int info;
     
     if (m<n) return -1;
 //    Ay=mat(n,1);
+    //* 1、计算右半部分A_y = Ay
     matmul("NN",n,1,m,1.0,A,y,0.0,Ay); /* Ay=A*y */
+    //* 2、计算左半部分括号里面的值Q=AA'
     matmul("NT",n,n,m,1.0,A,A,0.0,Q);  /* Q=A*A' */
+    //* 3、计算Q矩阵的逆Q^-1（覆盖Q了），最后右乘Ay，得到x值
     if (!(info=matinv(Q,n))) matmul("NN",n,1,n,1.0,Q,Ay,0.0,x); /* x=Q^-1*Ay */
 //    free(Ay);
     return info;
@@ -714,32 +733,38 @@ extern void satno2id(int sat, char *id)
     strcpy(id,"");
 }
 /* test excluded satellite -----------------------------------------------------
-* test excluded satellite
-* args   : int    sat       I   satellite number
+* test excluded satellite 检测某颗卫星在定位时是否需要将其排除，排除标准为该卫星是否处理选项预先规定的导航系统或排除标志。
+* args   : int    sat       I   satellite number //!从1开始
 *          int    svh       I   sv health flag
 *          prcopt_t *opt    I   processing options (NULL: not used)
 * return : status (1:excluded,0:not excluded)
 *-----------------------------------------------------------------------------*/
-//extern int satexclude(int sat, int svh, const prcopt_t *opt)
-//{
-//    int sys=satsys(sat,NULL);
-//    
-//    if (svh<0) return 1; /* ephemeris unavailable */
-//    
-//    if (opt) {
-//        if (opt->exsats[sat-1]==1) return 1; /* excluded satellite */
-//        if (opt->exsats[sat-1]==2) return 0; /* included satellite */
-//        if (!(sys&opt->navsys)) return 1; /* unselected sat sys */
-//    }
-//    if (sys==SYS_QZS) svh&=0xFE; /* mask QZSS LEX health */
-//    if (svh) {
-//        //trace(3,"unhealthy satellite: sat=%3d svh=%02X\n",sat,svh);
-//        return 1;
-//    }
-//    return 0;
-//}
+extern int satexclude(int sat, int svh, const prcopt_t *opt)
+{
+    //* 1、判断该卫星所属的导航系统
+   int sys=satsys(sat,NULL);
+   //* 2、接着检验 svh<0。是，则说明在 ephpos函数中调用 seleph为该卫星选择星历时，并无合适的星历可用，返回 1；否，则进入下一步。
+   if (svh<0) return 1; /* ephemeris unavailable */
+   //* 3、如果处理选项不为空，则检测处理选项中对该卫星的排除标志的值(1:excluded,2:included)，
+   //*      之后再检测该卫星所属的导航系统与处理选项中预先设定的是否一致。否，返回 1；是，进入下一步。
+   //! 3中再在比较该卫星与预先规定的导航系统是否一致时，使用了 sys&opt->navsys来进行比较。
+   //!      这样做的好处是当 opt->navsys=sys或 opt->navsys=SYS_ALL时，结果都会为真。
+   //!      之所以会这样，是因为在 rtklib.h文件中定义这些导航系统变量的时候，所赋的值在二进制形式下都是只有一位为 1的数。
+   if (opt) {
+       if (opt->exsats[sat-1]==1) return 1; /* excluded satellite */
+       if (opt->exsats[sat-1]==2) return 0; /* included satellite */
+       if (!(sys&opt->navsys)) return 1; /* unselected sat sys */
+   }
+   if (sys==SYS_QZS) svh&=0xFE; /* mask QZSS LEX health */
+   //* 4、如果此时 svh>0，说明此时卫星健康状况出现问题，此卫星不可用，返回 1。
+   if (svh) {tests
+       //trace(3,"unhealthy satellite: sat=%3d svh=%02X\n",sat,svh);
+       return 1;
+   }
+   return 0;
+}
 /* test SNR mask ---------------------------------------------------------------
-* test SNR mask
+* test SNR mask 检测接收机所属类型和频率信号的有效性
 * args   : int    base      I   rover or base-station (0:rover,1:base station)
 *          int    freq      I   frequency (0:L1,1:L2,2:L3,...)
 *          double el        I   elevation angle (rad)
@@ -752,9 +777,9 @@ extern int testsnr(int base, int freq, double el, double snr,
 {
     double minsnr,a;
     int i;
-    
+    //* 1、满足下列情况之一 !mask->ena[base]||freq<0||freq>=NFREQ，返回 0.
     if (!mask->ena[base]||freq<0||freq>=NFREQ) return 0;
-    
+    //* 2、对 el处理变换，根据后面 i的值得到不同的阈值 minsnr，而对 1<=i<=8的情况，则使用线性插值计算出 minsnr的值。
     a=(el*R2D+5.0)/10.0;
     i=(int)floor(a); a-=i;
     if      (i<1) minsnr=mask->mask[freq][0];
@@ -764,6 +789,7 @@ extern int testsnr(int base, int freq, double el, double snr,
     return snr<minsnr;
 }
 /* satellite azimuth/elevation angle -------------------------------------------
+* 计算在接收机位置处的站心坐标系中卫星的方位角和仰角
 * compute satellite azimuth/elevation angle
 * args   : double *pos      I   geodetic position {lat,lon,h} (rad,m)
 *          double *e        I   receiver-to-satellilte unit vevtor (ecef)
@@ -776,7 +802,9 @@ extern double satazel(const double *pos, const double *e, double *azel)
     double az=0.0,el=PI/2.0,enu[3];
     
     if (pos[2]>-RE_WGS84) {
+        //* 1、将 pos处的向量转换到以改点为原点的站心坐标系中。
         ecef2enu(pos,e,enu);
+        //* 2、调用 atan2函数计算出方位角，然后再算出仰角。
         az=dot(enu,enu,2)<1E-12?0.0:atan2(enu[0],enu[1]);
         if (az<0.0) az+=2*PI;
         el=asin(enu[2]);
@@ -795,6 +823,7 @@ extern double norm(const double *a, int n)
     return sqrt(dot(a,a,n));
 }
 /* geometric distance ----------------------------------------------------------
+* 计算卫星和当前接收机位置之间的几何距离和 receiver-to-satellite方向的单位向量。
 * compute geometric distance and receiver-to-satellite unit vector
 * args   : double *rs       I   satellilte position (ecef at transmission) (m)
 *          double *rr       I   receiver position (ecef at reception) (m)
@@ -806,15 +835,23 @@ extern double geodist(const double *rs, const double *rr, double *e)
 {
     double r;
     int i;
-    
+    //* 1、检查卫星到 WGS84坐标系原点的距离是否大于基准椭球体的长半径。
     if (norm(rs,3)<RE_WGS84) return -1.0;
+    //* 2、计算由接收机指向卫星方向的观测矢量，之后在计算出相应的单位矢量。
     for (i=0;i<3;i++) e[i]=rs[i]-rr[i];
     r=norm(e,3);
+    //* 3、考虑到地球自转，即信号发射时刻卫星的位置与信号接收时刻卫星的位置在 WGS84坐标系中并不一致，进行关于 Sagnac效应的校正。
     for (i=0;i<3;i++) e[i]/=r;
     return r+OMGE*(rs[0]*rr[1]-rs[1]*rr[0])/CLIGHT;
 }
 /* ionosphere model ------------------------------------------------------------
-* compute ionospheric delay by broadcast ionosphere model (klobuchar model)
+* compute ionospheric delay by broadcast ionosphere model (klobuchar model) 
+* 计算采用 Klobuchar模型时的电离层延时 (L1，m)。
+! 这里计算的电离层延时是相对于 GPS-L1信号而言的，其它频率信号需要进行一次转换。
+! 计算过程中很多角度的单位是半圆，即 弧度。在阅读代码时，记住这一点非常重要！
+! 比如，虽然上述过程与 ICD-GPS-200C P148中一致，但可能与大部分资料上的过程还是会有所区别。尤其是下面这个公式。
+! 王虎，精密单点定位中电离层延迟改正模型的研究与分析
+! 但是将下面公式的角度转化成半圆，即左右两边都除以 180，就可以得到上面的公式了！
 * args   : gtime_t t        I   time (gpst)
 *          double *ion      I   iono model parameters {a0,a1,a2,a3,b0,b1,b2,b3}
 *          double *pos      I   receiver position {lat,lon,h} (rad,m)
@@ -824,6 +861,7 @@ extern double geodist(const double *rs, const double *rr, double *e)
 extern double ionmodel(gtime_t t, const double *ion, const double *pos,
                        const double *azel)
 {
+    //* 主要都是数学计算，其过程可以在 ICD-GPS-200C P148中找到。
     const double ion_default[]={ /* 2004/1/1 */
         0.1118E-07,-0.7451E-08,-0.5961E-07, 0.1192E-06,
         0.1167E+06,-0.2294E+06,-0.1311E+06, 0.1049E+07
@@ -864,6 +902,7 @@ extern double ionmodel(gtime_t t, const double *ion, const double *pos,
 }
 /* troposphere model -----------------------------------------------------------
 * compute tropospheric delay by standard atmosphere and saastamoinen model
+* 由标准大气和 Saastamoinen模型，计算电离层延时(m)
 * args   : gtime_t time     I   time
 *          double *pos      I   receiver position {lat,lon,h} (rad,m)
 *          double *azel     I   azimuth/elevation angle {az,el} (rad)
@@ -873,6 +912,7 @@ extern double ionmodel(gtime_t t, const double *ion, const double *pos,
 extern double tropmodel(gtime_t time, const double *pos, const double *azel,
                         double humi)
 {
+    //* 1、与处理过程相对应的公式，请见 RTKLIB manual P149
     const double temp0=15.0; /* temparature at sea level */
     double hgt,pres,temp,e,z,trph,trpw;
     
